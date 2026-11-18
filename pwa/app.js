@@ -872,69 +872,100 @@ function initSeekEvents() {
 }
 
 // ==================== Audius Search & Direct Download ====================
-async function executeAudiusSearch(query, resultsEl, statusText) {
-  statusText.innerHTML = `Поиск «<b>${escapeHtml(query)}</b>» в открытом каталоге…`;
+async function searchAudiusApi(q) {
   try {
-    const url = `https://api.audius.co/v1/tracks/search?query=${encodeURIComponent(query)}&app_name=SoundPulsePWA`;
+    const url = `https://api.audius.co/v1/tracks/search?query=${encodeURIComponent(q)}&app_name=SoundPulsePWA`;
     const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    if (!resp.ok) return [];
     const json = await resp.json();
-    const items = (json.data || []).slice(0, 15);
-
-    if (!items.length) {
-      statusText.innerHTML = `По запросу «<b>${escapeHtml(query)}</b>» ничего не найдено.<br><span style="font-size:12px;opacity:0.8">Попробуйте ввести только исполнителя или более короткое название.</span>`;
-      resultsEl.innerHTML = "";
-      return;
-    }
-
-    statusText.innerHTML = `Найдено треков: <b>${items.length}</b>. Нажмите «Скачать» для сохранения в память iPhone:`;
-    resultsEl.innerHTML = items.map((item) => {
-      const title = item.title || "Без названия";
-      const artist = item.user?.name || "Audius Artist";
-      const thumb = item.artwork?.["150x150"] || "";
-      const dur = formatTime(item.duration || 0);
-      return `
-        <div class="dl-result-row">
-          ${thumb ? `<img class="dl-thumb" src="${escapeHtml(thumb)}" alt="" loading="lazy" />` : `<div class="dl-thumb"></div>`}
-          <div class="dl-meta">
-            <div class="track-title">${escapeHtml(title)}</div>
-            <div class="track-line2">${escapeHtml(artist)} · <span class="num">${dur}</span></div>
-          </div>
-          <button class="btn-dl-item" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(title)}" data-artist="${escapeHtml(artist)}" type="button">Скачать</button>
-        </div>
-      `;
-    }).join("");
-
-    resultsEl.querySelectorAll(".btn-dl-item").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        btn.disabled = true;
-        btn.textContent = "Загрузка…";
-        try {
-          const streamUrl = `https://api.audius.co/v1/tracks/${encodeURIComponent(btn.dataset.id)}/stream?app_name=SoundPulsePWA`;
-          const r = await fetch(streamUrl);
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          const blob = await r.blob();
-          btn.textContent = "AI-анализ…";
-          await addAudioBlobs([{
-            title: btn.dataset.title,
-            artist: btn.dataset.artist,
-            blob
-          }]);
-          btn.textContent = "В памяти ✓";
-          btn.style.background = "rgba(16, 185, 129, 0.2)";
-          btn.style.borderColor = "var(--accent-emerald)";
-          btn.style.color = "var(--accent-emerald)";
-        } catch (e) {
-          btn.textContent = "Ошибка";
-          btn.disabled = false;
-          console.error("Download track error:", e);
-        }
-      });
-    });
-  } catch (err) {
-    statusText.textContent = `Ошибка поиска: ${err.message}`;
-    resultsEl.innerHTML = "";
+    return (json.data || []).filter((item) => item.is_streamable !== false);
+  } catch (e) {
+    console.warn("Audius query error:", e);
+    return [];
   }
+}
+
+async function executeAudiusSearch(query, resultsEl, statusText) {
+  statusText.innerHTML = `Поиск «<b>${escapeHtml(query)}</b>» в каталоге…`;
+
+  // 1. Try full cleaned query
+  let items = await searchAudiusApi(query);
+
+  // 2. If 0 results, try query without hyphens/dashes
+  if (!items.length && /[-–—]/.test(query)) {
+    const simplified = query.replace(/[-–—]+/g, " ").replace(/\s+/g, " ").trim();
+    items = await searchAudiusApi(simplified);
+  }
+
+  // 3. If still 0 results, try track title (after dash) or artist (before dash)
+  if (!items.length && /[-–—]/.test(query)) {
+    const parts = query.split(/[-–—]/).map((s) => s.trim()).filter(Boolean);
+    if (parts.length >= 2) {
+      items = await searchAudiusApi(parts[1]); // e.g. "Bailando"
+      if (!items.length) {
+        items = await searchAudiusApi(parts[0]); // e.g. "Enrique Iglesias"
+      }
+    }
+  }
+
+  // 4. Fallback: try first 2 words
+  if (!items.length) {
+    const words = query.split(/\s+/).slice(0, 2).join(" ");
+    if (words && words !== query) {
+      items = await searchAudiusApi(words);
+    }
+  }
+
+  if (!items.length) {
+    statusText.innerHTML = `По запросу «<b>${escapeHtml(query)}</b>» ничего не найдено.<br><span style="font-size:12px;opacity:0.85">Попробуйте ввести только название песни или имя исполнителя (например, <i>Bailando</i>).</span>`;
+    resultsEl.innerHTML = "";
+    return;
+  }
+
+  statusText.innerHTML = `Найдено треков: <b>${items.length}</b>. Нажмите «Скачать» для сохранения в память iPhone:`;
+  resultsEl.innerHTML = items.slice(0, 15).map((item) => {
+    const title = item.title || "Без названия";
+    const artist = item.user?.name || "Audius Artist";
+    const thumb = item.artwork?.["150x150"] || "";
+    const dur = formatTime(item.duration || 0);
+    return `
+      <div class="dl-result-row">
+        ${thumb ? `<img class="dl-thumb" src="${escapeHtml(thumb)}" alt="" loading="lazy" />` : `<div class="dl-thumb"></div>`}
+        <div class="dl-meta">
+          <div class="track-title">${escapeHtml(title)}</div>
+          <div class="track-line2">${escapeHtml(artist)} · <span class="num">${dur}</span></div>
+        </div>
+        <button class="btn-dl-item" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(title)}" data-artist="${escapeHtml(artist)}" type="button">Скачать</button>
+      </div>
+    `;
+  }).join("");
+
+  resultsEl.querySelectorAll(".btn-dl-item").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      btn.textContent = "Загрузка…";
+      try {
+        const streamUrl = `https://api.audius.co/v1/tracks/${encodeURIComponent(btn.dataset.id)}/stream?app_name=SoundPulsePWA`;
+        const r = await fetch(streamUrl);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const blob = await r.blob();
+        btn.textContent = "AI-анализ…";
+        await addAudioBlobs([{
+          title: btn.dataset.title,
+          artist: btn.dataset.artist,
+          blob
+        }]);
+        btn.textContent = "В памяти ✓";
+        btn.style.background = "rgba(16, 185, 129, 0.2)";
+        btn.style.borderColor = "var(--accent-emerald)";
+        btn.style.color = "var(--accent-emerald)";
+      } catch (e) {
+        btn.textContent = "Ошибка";
+        btn.disabled = false;
+        console.error("Download track error:", e);
+      }
+    });
+  });
 }
 
 async function handleDownloadSearch() {
@@ -958,11 +989,15 @@ async function handleDownloadSearch() {
       if (oembedResp.ok) {
         const oembedData = await oembedResp.json();
         let rawTitle = oembedData.title || "";
-        // Strip out typical YouTube title clutter
+        // 1. Strip bracketed / parenthesized metadata: (Lyrics), [Official Video], etc.
         let cleanTitle = rawTitle
-          .replace(/\s*[\(\[](?:Official|Music|Video|Lyrics|Audio|HD|4K|Visualizer|feat\.|ft\.)[^\)\]]*[\)\]]/gi, "")
+          .replace(/\s*[\(\[][^\)\]]*(?:Official|Music|Video|Lyrics|Audio|HD|4K|Visualizer|Clip|Remix|Edit|ft\.|feat\.)[^\)\]]*[\)\]]/gi, "")
           .replace(/\s*\|\s*.*$/, "")
+          .replace(/\s*\/\/\s*.*$/, "")
           .trim();
+
+        // 2. Strip trailing "feat. ...", "ft. ...", "featuring ..."
+        cleanTitle = cleanTitle.replace(/\s+\b(?:feat\.?|ft\.?|featuring)\b.*$/i, "").trim();
 
         if (cleanTitle) {
           statusText.innerHTML = `🎵 Распознано: <b>${escapeHtml(cleanTitle)}</b><br><span style="font-size:12px;opacity:0.85">Ищем для скачивания в память iPhone…</span>`;
