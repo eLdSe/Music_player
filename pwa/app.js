@@ -1016,7 +1016,16 @@ async function initApp() {
   initSeekEvents();
 
   if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("./sw.js").catch(() => {});
+    navigator.serviceWorker.register("./sw.js").then((reg) => {
+      reg.update();
+    }).catch(() => {});
+
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (!window.__swReloaded) {
+        window.__swReloaded = true;
+        window.location.reload();
+      }
+    });
   }
 
   // Load saved tracks from IndexedDB

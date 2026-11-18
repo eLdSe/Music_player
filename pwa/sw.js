@@ -1,9 +1,10 @@
-const CACHE_NAME = "soundpulse-pwa-v4";
+const CACHE_NAME = "soundpulse-pwa-v5";
 const CORE_ASSETS = [
   "./",
   "./index.html",
-  "./styles.css",
-  "./app.js",
+  "./index.html?v=5",
+  "./styles.css?v=5",
+  "./app.js?v=5",
   "./manifest.json",
   "./apple-touch-icon.png",
   "./icon-512.png",
@@ -12,15 +13,18 @@ const CORE_ASSETS = [
 ];
 
 self.addEventListener("install", (event) => {
+  self.skipWaiting();
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(CORE_ASSETS)).then(() => self.skipWaiting())
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(CORE_ASSETS))
   );
 });
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
+      Promise.all(keys.map((k) => {
+        if (k !== CACHE_NAME) return caches.delete(k);
+      }))
     ).then(() => self.clients.claim())
   );
 });
@@ -48,6 +52,21 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  // Network-first for HTML, JS and CSS to ensure instant updates on mobile!
+  if (req.mode === "navigate" || url.pathname.endsWith(".html") || url.pathname.endsWith(".js") || url.pathname.endsWith(".css")) {
+    event.respondWith(
+      fetch(req).then((resp) => {
+        if (resp && resp.status === 200) {
+          const clone = resp.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(req, clone));
+        }
+        return resp;
+      }).catch(() => caches.match(req))
+    );
+    return;
+  }
+
+  // Cache-first for large static assets (ONNX model, icons, sounds)
   event.respondWith(
     caches.match(req).then((cached) => {
       if (cached) return cached;
@@ -58,9 +77,6 @@ self.addEventListener("fetch", (event) => {
         }
         return resp;
       });
-    }).catch((err) => {
-      console.warn("SW fetch offline fallback:", err);
-      return new Response("Offline or Network Error", { status: 503, statusText: "Offline" });
-    })
+    }).catch(() => new Response("Offline", { status: 503, statusText: "Offline" }))
   );
 });
