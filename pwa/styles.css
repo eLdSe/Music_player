@@ -61,9 +61,9 @@ html, body {
   position: relative;
 }
 
-/* Top Bar (48px + iOS notch safe area) */
+/* Top Bar (iOS status bar & notch safe area) */
 .topbar {
-  padding-top: var(--safe-top);
+  padding-top: max(48px, env(safe-area-inset-top, 48px));
   background: var(--ground);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -545,7 +545,7 @@ html, body {
   bottom: 0;
   background: var(--surface);
   border-top: 1px solid var(--border);
-  padding-bottom: var(--safe-bottom);
+  padding-bottom: max(20px, env(safe-area-inset-bottom, 20px));
   z-index: 20;
 }
 

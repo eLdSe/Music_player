@@ -1,4 +1,4 @@
-const CACHE_NAME = "soundpulse-pwa-v3";
+const CACHE_NAME = "soundpulse-pwa-v4";
 const CORE_ASSETS = [
   "./",
   "./index.html",
@@ -8,7 +8,7 @@ const CORE_ASSETS = [
   "./apple-touch-icon.png",
   "./icon-512.png",
   "./models/labels.json",
-  "./models/music_classifier.int8.onnx"
+  "./models/music_classifier.onnx"
 ];
 
 self.addEventListener("install", (event) => {

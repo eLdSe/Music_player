@@ -1029,9 +1029,19 @@ async function initApp() {
   renderTrackList();
   updateStatsView();
 
-  // Load labels.json + MusicAudioNetV2 INT8 ONNX model
+  // Load labels.json + MusicAudioNetV2 ONNX model
   const statusDot = document.getElementById("aiStatusDot");
   const statusText = document.getElementById("aiStatusText");
+  let lastAiError = null;
+
+  document.getElementById("aiStatusPill").addEventListener("click", () => {
+    if (ortSession) {
+      alert("🟢 SoundPulse AI (MusicAudioNetV2)\nМодель загружена в память iPhone.\n12 жанров + 5 вайбов работают локально офлайн.");
+    } else {
+      alert("⚠️ Статус AI: " + (lastAiError || "Инициализация нейросети..."));
+    }
+  });
+
   try {
     const lblResp = await fetch("./models/labels.json");
     if (lblResp.ok) {
@@ -1040,6 +1050,8 @@ async function initApp() {
       updateStatsView();
     }
 
+    statusText.textContent = "Загрузка AI…";
+
     // Configure single-threaded WebAssembly execution provider for iOS Safari / Mobile WebKit
     if (window.ort && ort.env && ort.env.wasm) {
       ort.env.wasm.numThreads = 1;
@@ -1047,8 +1059,12 @@ async function initApp() {
       ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/";
     }
 
+    const modelResp = await fetch("./models/music_classifier.onnx");
+    if (!modelResp.ok) throw new Error(`HTTP ${modelResp.status} загрузки модели`);
+    const modelBuf = await modelResp.arrayBuffer();
+
     try {
-      ortSession = await ort.InferenceSession.create("./models/music_classifier.int8.onnx", {
+      ortSession = await ort.InferenceSession.create(new Uint8Array(modelBuf), {
         executionProviders: ["wasm"]
       });
     } catch (simdErr) {
@@ -1056,7 +1072,7 @@ async function initApp() {
       if (window.ort && ort.env && ort.env.wasm) {
         ort.env.wasm.simd = false;
       }
-      ortSession = await ort.InferenceSession.create("./models/music_classifier.int8.onnx", {
+      ortSession = await ort.InferenceSession.create(new Uint8Array(modelBuf), {
         executionProviders: ["wasm"]
       });
     }
@@ -1066,6 +1082,7 @@ async function initApp() {
   } catch (err) {
     statusDot.className = "status-dot error";
     statusText.textContent = "Офлайн / Ошибка AI";
+    lastAiError = err.message || String(err);
     console.error("ONNX init error:", err);
   }
 
