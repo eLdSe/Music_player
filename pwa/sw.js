@@ -1,10 +1,10 @@
-const CACHE_NAME = "soundpulse-pwa-v6";
+const CACHE_NAME = "soundpulse-pwa-v7";
 const CORE_ASSETS = [
   "./",
   "./index.html",
-  "./index.html?v=6",
-  "./styles.css?v=6",
-  "./app.js?v=6",
+  "./index.html?v=7",
+  "./styles.css?v=7",
+  "./app.js?v=7",
   "./manifest.json",
   "./apple-touch-icon.png",
   "./icon-512.png",

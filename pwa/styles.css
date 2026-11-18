@@ -18,8 +18,8 @@
   --vibe-3: #c084fc; /* Лирика / Грусть */
   --vibe-4: #38bdf8; /* Фокус / Концентрация */
 
-  --safe-top: env(safe-area-inset-top, 0px);
-  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-top: max(48px, env(safe-area-inset-top, 48px));
+  --safe-bottom: max(20px, env(safe-area-inset-bottom, 20px));
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
 }
 
@@ -654,8 +654,8 @@ html, body {
   z-index: 40;
   display: none;
   flex-direction: column;
-  padding-top: var(--safe-top);
-  padding-bottom: var(--safe-bottom);
+  padding-top: max(50px, env(safe-area-inset-top, 50px));
+  padding-bottom: max(24px, env(safe-area-inset-bottom, 24px));
 }
 
 .sheet-backdrop.open {

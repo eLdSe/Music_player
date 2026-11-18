@@ -424,27 +424,12 @@ async function analyzeTrackBlob(blob) {
 }
 
 // ==================== UI & Player State ====================
+// IMPORTANT: audioEl plays natively without createMediaElementSource routing.
+// Routing HTML5 audio through Web Audio AudioContext causes iOS WebKit to immediately
+// mute the audio whenever the screen locks or app goes to background.
+// Leaving audioEl unhijacked allows continuous, non-muted background & lock screen playback!
 const audioEl = document.getElementById("audioEl");
-let audioCtx = null;
-let analyserNode = null;
-let mediaSrcNode = null;
 let vizRafId = null;
-
-function ensureWebAudioAnalyser() {
-  if (audioCtx) return;
-  try {
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    audioCtx = new Ctx();
-    analyserNode = audioCtx.createAnalyser();
-    analyserNode.fftSize = 64;
-    analyserNode.smoothingTimeConstant = 0.72;
-    mediaSrcNode = audioCtx.createMediaElementSource(audioEl);
-    mediaSrcNode.connect(analyserNode);
-    analyserNode.connect(audioCtx.destination);
-  } catch (_) {
-    // Fallback if iOS restricts createMediaElementSource on cross-origin
-  }
-}
 
 function formatTime(sec) {
   if (!sec || !isFinite(sec) || sec < 0) return "00:00";
@@ -667,11 +652,6 @@ function playTrackById(id) {
   const track = tracks.find((t) => t.id === id);
   if (!track || !track.blob) return;
 
-  ensureWebAudioAnalyser();
-  if (audioCtx && audioCtx.state === "suspended") {
-    audioCtx.resume();
-  }
-
   if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
   currentObjectUrl = URL.createObjectURL(track.blob);
   currentTrackId = track.id;
@@ -702,9 +682,14 @@ function setupMediaSession(track) {
   if (!("mediaSession" in navigator)) return;
   navigator.mediaSession.metadata = new MediaMetadata({
     title: track.title,
-    artist: `${track.artist} · ${track.vibeShort}`,
-    album: `SoundPulse AI (${track.genreDisplay})`
+    artist: `${track.artist} · ${track.vibeShort || ""}`,
+    album: `SoundPulse AI (${track.genreDisplay || "Музыка"})`,
+    artwork: [
+      { src: "./apple-touch-icon.png", sizes: "180x180", type: "image/png" },
+      { src: "./icon-512.png", sizes: "512x512", type: "image/png" }
+    ]
   });
+  navigator.mediaSession.playbackState = "playing";
   navigator.mediaSession.setActionHandler("play", () => audioEl.play());
   navigator.mediaSession.setActionHandler("pause", () => audioEl.pause());
   navigator.mediaSession.setActionHandler("previoustrack", () => playAdjacent(-1));
@@ -791,25 +776,36 @@ function initVizBars() {
 function startVisualizerLoop() {
   if (vizRafId) cancelAnimationFrame(vizRafId);
   const bars = document.querySelectorAll("#sheetVizBars .viz-bar");
-  const freqData = new Uint8Array(32);
 
   function tick() {
     const sheetOpen = document.getElementById("playerSheet").classList.contains("open");
-    if (!sheetOpen) return;
+    if (!sheetOpen) {
+      vizRafId = requestAnimationFrame(tick);
+      return;
+    }
 
     const track = tracks.find((t) => t.id === currentTrackId);
     const color = track?.vibeColor || "#10b981";
 
-    if (!audioEl.paused && analyserNode) {
-      analyserNode.getByteFrequencyData(freqData);
+    if (!audioEl.paused) {
+      const time = audioEl.currentTime || 0;
+      const bpm = track?.bpm || 110;
+      const energy = track?.energy || 0.75;
+      const beatSec = 60 / Math.max(40, bpm);
+      const phase = (time % beatSec) / beatSec;
+      const beatPulse = Math.sin(phase * Math.PI); // Pulse with the track's real beat
+
       bars.forEach((bar, i) => {
-        const val = freqData[i + 1] / 255.0;
-        bar.style.height = `${Math.max(4, Math.round(val * 42))}px`;
+        const harmonic = Math.sin(time * 5.2 + i * 0.9) * 0.5 + 0.5;
+        const sub = Math.cos(time * 3.1 + i * 1.3) * 0.3 + 0.3;
+        const weight = (beatPulse * 0.55 + harmonic * 0.30 + sub * 0.15) * energy;
+        const h = Math.max(5, Math.min(42, Math.round(weight * 44)));
+        bar.style.height = `${h}px`;
         bar.style.background = color;
       });
     } else {
       bars.forEach((bar) => {
-        bar.style.height = "4px";
+        bar.style.height = "5px";
         bar.style.background = color;
       });
     }
@@ -1219,8 +1215,14 @@ async function initApp() {
     updateStatsView();
   });
 
-  audioEl.addEventListener("play", syncPlayButtons);
-  audioEl.addEventListener("pause", syncPlayButtons);
+  audioEl.addEventListener("play", () => {
+    syncPlayButtons();
+    if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+  });
+  audioEl.addEventListener("pause", () => {
+    syncPlayButtons();
+    if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
+  });
   audioEl.addEventListener("ended", () => playAdjacent(1));
   audioEl.addEventListener("timeupdate", () => {
     const dur = audioEl.duration || 0;
