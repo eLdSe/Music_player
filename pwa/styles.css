@@ -18,8 +18,8 @@
   --vibe-3: #c084fc; /* Лирика / Грусть */
   --vibe-4: #38bdf8; /* Фокус / Концентрация */
 
-  --safe-top: max(48px, env(safe-area-inset-top, 48px));
-  --safe-bottom: max(20px, env(safe-area-inset-bottom, 20px));
+  --safe-top: max(68px, calc(env(safe-area-inset-top, 47px) + 20px));
+  --safe-bottom: max(24px, env(safe-area-inset-bottom, 24px));
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
 }
 
@@ -63,7 +63,7 @@ html, body {
 
 /* Top Bar (iOS status bar & notch safe area) */
 .topbar {
-  padding-top: max(48px, env(safe-area-inset-top, 48px));
+  padding-top: max(68px, calc(env(safe-area-inset-top, 47px) + 20px));
   background: var(--ground);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -654,8 +654,8 @@ html, body {
   z-index: 40;
   display: none;
   flex-direction: column;
-  padding-top: max(50px, env(safe-area-inset-top, 50px));
-  padding-bottom: max(24px, env(safe-area-inset-bottom, 24px));
+  padding-top: max(68px, calc(env(safe-area-inset-top, 47px) + 20px));
+  padding-bottom: max(28px, env(safe-area-inset-bottom, 28px));
 }
 
 .sheet-backdrop.open {
