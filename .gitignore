@@ -1,0 +1,18 @@
+# .NET build outputs
+**/bin/
+**/obj/
+.vs/
+*.user
+
+# Release builds (distribute via GitHub Releases)
+release/
+*.dll
+
+# Python / Kaggle temp
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
