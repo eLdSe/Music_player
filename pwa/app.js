@@ -872,50 +872,22 @@ function initSeekEvents() {
 }
 
 // ==================== Audius Search & Direct Download ====================
-async function handleDownloadSearch() {
-  const input = document.getElementById("dlQueryInput").value.trim();
-  if (!input) return;
-
-  const banner = document.getElementById("dlStatusBanner");
-  const statusText = document.getElementById("dlStatusText");
-  const resultsEl = document.getElementById("dlResultsList");
-
-  banner.classList.add("visible");
-
-  // Direct URL download
-  if (/^https?:\/\//i.test(input)) {
-    statusText.textContent = "Скачивание аудио по прямой ссылке…";
-    try {
-      const resp = await fetch(input);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const blob = await resp.blob();
-      const name = decodeURIComponent(input.split("/").pop().split("?")[0]) || "Track.mp3";
-      const meta = parseFileName(name);
-      statusText.textContent = "Запущен AI-анализ…";
-      await addAudioBlobs([{ title: meta.title, artist: meta.artist, blob }]);
-      statusText.textContent = "Добавлено в офлайн-библиотеку!";
-      document.getElementById("dlQueryInput").value = "";
-    } catch (err) {
-      statusText.textContent = `Ошибка загрузки: ${err.message}`;
-    }
-    return;
-  }
-
-  // Audius open catalog search
-  statusText.textContent = `Поиск «${input}» в каталоге Audius…`;
+async function executeAudiusSearch(query, resultsEl, statusText) {
+  statusText.innerHTML = `Поиск «<b>${escapeHtml(query)}</b>» в открытом каталоге…`;
   try {
-    const url = `https://api.audius.co/v1/tracks/search?query=${encodeURIComponent(input)}&app_name=SoundPulsePWA`;
+    const url = `https://api.audius.co/v1/tracks/search?query=${encodeURIComponent(query)}&app_name=SoundPulsePWA`;
     const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const json = await resp.json();
     const items = (json.data || []).slice(0, 15);
 
     if (!items.length) {
-      statusText.textContent = "Ничего не найдено.";
+      statusText.innerHTML = `По запросу «<b>${escapeHtml(query)}</b>» ничего не найдено.<br><span style="font-size:12px;opacity:0.8">Попробуйте ввести только исполнителя или более короткое название.</span>`;
       resultsEl.innerHTML = "";
       return;
     }
 
-    statusText.textContent = `Найдено треков: ${items.length}`;
+    statusText.innerHTML = `Найдено треков: <b>${items.length}</b>. Нажмите «Скачать» для сохранения в память iPhone:`;
     resultsEl.innerHTML = items.map((item) => {
       const title = item.title || "Без названия";
       const artist = item.user?.name || "Audius Artist";
@@ -948,16 +920,85 @@ async function handleDownloadSearch() {
             artist: btn.dataset.artist,
             blob
           }]);
-          btn.textContent = "В библиотеке";
+          btn.textContent = "В памяти ✓";
+          btn.style.background = "rgba(16, 185, 129, 0.2)";
+          btn.style.borderColor = "var(--accent-emerald)";
+          btn.style.color = "var(--accent-emerald)";
         } catch (e) {
           btn.textContent = "Ошибка";
           btn.disabled = false;
+          console.error("Download track error:", e);
         }
       });
     });
   } catch (err) {
     statusText.textContent = `Ошибка поиска: ${err.message}`;
+    resultsEl.innerHTML = "";
   }
+}
+
+async function handleDownloadSearch() {
+  const input = document.getElementById("dlQueryInput").value.trim();
+  if (!input) return;
+
+  const banner = document.getElementById("dlStatusBanner");
+  const statusText = document.getElementById("dlStatusText");
+  const resultsEl = document.getElementById("dlResultsList");
+
+  banner.classList.add("visible");
+  resultsEl.innerHTML = "";
+
+  // 1. YouTube link detection -> resolve song title via oEmbed and search Audius
+  const isYouTube = /(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([\w-]{11})/i.test(input);
+  if (isYouTube) {
+    statusText.textContent = "Распознаём название трека по ссылке YouTube…";
+    try {
+      const oembedUrl = `https://noembed.com/embed?url=${encodeURIComponent(input)}`;
+      const oembedResp = await fetch(oembedUrl);
+      if (oembedResp.ok) {
+        const oembedData = await oembedResp.json();
+        let rawTitle = oembedData.title || "";
+        // Strip out typical YouTube title clutter
+        let cleanTitle = rawTitle
+          .replace(/\s*[\(\[](?:Official|Music|Video|Lyrics|Audio|HD|4K|Visualizer|feat\.|ft\.)[^\)\]]*[\)\]]/gi, "")
+          .replace(/\s*\|\s*.*$/, "")
+          .trim();
+
+        if (cleanTitle) {
+          statusText.innerHTML = `🎵 Распознано: <b>${escapeHtml(cleanTitle)}</b><br><span style="font-size:12px;opacity:0.85">Ищем для скачивания в память iPhone…</span>`;
+          await executeAudiusSearch(cleanTitle, resultsEl, statusText);
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn("YouTube oEmbed lookup failed:", e);
+    }
+
+    statusText.innerHTML = `⚠️ YouTube блокирует прямое скачивание через браузер на iPhone (CORS).<br>💡 Введите <b>название песни или исполнителя текстом</b> в строку поиска, либо используйте SoundPulse.exe на ПК (где встроен yt-dlp).`;
+    return;
+  }
+
+  // 2. Direct Audio URL download (.mp3, .m4a, .wav, .flac, .ogg)
+  if (/^https?:\/\//i.test(input)) {
+    statusText.textContent = "Скачивание аудио по прямой ссылке…";
+    try {
+      const resp = await fetch(input);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const name = decodeURIComponent(input.split("/").pop().split("?")[0]) || "Track.mp3";
+      const meta = parseFileName(name);
+      statusText.textContent = "Запущен AI-анализ…";
+      await addAudioBlobs([{ title: meta.title, artist: meta.artist, blob }]);
+      statusText.textContent = "✅ Трек успешно добавлен в память iPhone!";
+      document.getElementById("dlQueryInput").value = "";
+    } catch (err) {
+      statusText.textContent = `Ошибка скачивания: ${err.message}. Убедитесь, что ссылка ведёт напрямую на .mp3/.m4a файл с поддержкой CORS.`;
+    }
+    return;
+  }
+
+  // 3. Normal text query search
+  await executeAudiusSearch(input, resultsEl, statusText);
 }
 
 function escapeHtml(str) {
@@ -999,14 +1040,31 @@ async function initApp() {
       updateStatsView();
     }
 
-    ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
-    ortSession = await ort.InferenceSession.create("./models/music_classifier.int8.onnx", {
-      executionProviders: ["wasm"]
-    });
-    statusDot.classList.add("ready");
-    statusText.textContent = "AI v2 готов";
+    // Configure single-threaded WebAssembly execution provider for iOS Safari / Mobile WebKit
+    if (window.ort && ort.env && ort.env.wasm) {
+      ort.env.wasm.numThreads = 1;
+      ort.env.wasm.simd = true;
+      ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/";
+    }
+
+    try {
+      ortSession = await ort.InferenceSession.create("./models/music_classifier.int8.onnx", {
+        executionProviders: ["wasm"]
+      });
+    } catch (simdErr) {
+      console.warn("WASM SIMD failed on this device, trying fallback...", simdErr);
+      if (window.ort && ort.env && ort.env.wasm) {
+        ort.env.wasm.simd = false;
+      }
+      ortSession = await ort.InferenceSession.create("./models/music_classifier.int8.onnx", {
+        executionProviders: ["wasm"]
+      });
+    }
+
+    statusDot.className = "status-dot ready";
+    statusText.textContent = "AI готов";
   } catch (err) {
-    statusDot.classList.add("error");
+    statusDot.className = "status-dot error";
     statusText.textContent = "Офлайн / Ошибка AI";
     console.error("ONNX init error:", err);
   }

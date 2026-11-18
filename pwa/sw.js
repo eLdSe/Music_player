@@ -1,4 +1,4 @@
-const CACHE_NAME = "soundpulse-pwa-v2";
+const CACHE_NAME = "soundpulse-pwa-v3";
 const CORE_ASSETS = [
   "./",
   "./index.html",
@@ -29,10 +29,22 @@ self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET") return;
 
-  const url = new URL(req.url);
+  let url;
+  try {
+    url = new URL(req.url);
+  } catch {
+    return;
+  }
 
-  // Network-first for Audius API streams/search, Cache-first for app shell & ONNX model
-  if (url.hostname.includes("audius.co")) {
+  // Bypass service worker cache for external APIs (Audius, YouTube oembed, etc.)
+  if (
+    url.hostname.includes("audius.co") ||
+    url.hostname.includes("noembed.com") ||
+    url.hostname.includes("youtube.com") ||
+    url.hostname.includes("youtu.be") ||
+    url.hostname.includes("googlevideo.com") ||
+    (url.origin !== self.location.origin && !url.hostname.includes("jsdelivr.net"))
+  ) {
     return;
   }
 
@@ -46,6 +58,9 @@ self.addEventListener("fetch", (event) => {
         }
         return resp;
       });
+    }).catch((err) => {
+      console.warn("SW fetch offline fallback:", err);
+      return new Response("Offline or Network Error", { status: 503, statusText: "Offline" });
     })
   );
 });
