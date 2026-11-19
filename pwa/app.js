@@ -292,6 +292,16 @@ async function dbGetAllTracks() {
   });
 }
 
+async function dbGetTrack(id) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("tracks", "readonly");
+    const req = tx.objectStore("tracks").get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
 async function dbSaveTrack(track) {
   const db = await openDb();
   return new Promise((resolve, reject) => {
@@ -430,6 +440,43 @@ async function analyzeTrackBlob(blob) {
 // Leaving audioEl unhijacked allows continuous, non-muted background & lock screen playback!
 const audioEl = document.getElementById("audioEl");
 let vizRafId = null;
+
+// Background / Lock Screen auto-advance state
+let isTransitioning = false;
+let transitionTimer = null;
+let userPaused = false;
+let lastObservedTime = 0;
+let lastManualSeekAt = 0;
+let lastAdvanceAt = 0;
+let lastPosSyncAt = 0;
+let errorRecoveredTrackId = null;
+
+function setAudioSessionPlayback() {
+  try {
+    if ("audioSession" in navigator && navigator.audioSession) {
+      navigator.audioSession.type = "playback";
+    }
+  } catch (_) {}
+}
+
+function ensureTypedAudioBlob(blob, title = "") {
+  if (!blob) return blob;
+  if (blob.type && blob.type.startsWith("audio/")) return blob;
+  const lower = (title || "").toLowerCase();
+  let mime = "audio/mpeg";
+  if (lower.endsWith(".m4a") || lower.endsWith(".mp4")) mime = "audio/mp4";
+  else if (lower.endsWith(".wav")) mime = "audio/wav";
+  else if (lower.endsWith(".ogg") || lower.endsWith(".opus")) mime = "audio/ogg";
+  else if (lower.endsWith(".flac")) mime = "audio/flac";
+  else if (lower.endsWith(".aac")) mime = "audio/aac";
+  return blob.slice(0, blob.size, mime);
+}
+
+function updateActiveTrackRowHighlight() {
+  document.querySelectorAll("#trackList .track-row").forEach((row) => {
+    row.classList.toggle("playing", row.dataset.id === currentTrackId);
+  });
+}
 
 function formatTime(sec) {
   if (!sec || !isFinite(sec) || sec < 0) return "00:00";
@@ -648,22 +695,130 @@ async function addAudioBlobs(fileEntries) {
 }
 
 // ==================== Playback & Lock Screen MediaSession ====================
+function getNextTrackInPool(dir = 1) {
+  const list = getFilteredTracks();
+  const pool = list.length ? list : tracks;
+  if (!pool.length) return null;
+  const idx = pool.findIndex((t) => t.id === currentTrackId);
+  if (idx === -1) return dir >= 0 ? pool[0] : pool[pool.length - 1];
+  const nextIdx = (idx + dir + pool.length) % pool.length;
+  return pool[nextIdx] || null;
+}
+
+function updateMediaSessionPosition() {
+  if (!("mediaSession" in navigator) || typeof navigator.mediaSession.setPositionState !== "function") return;
+  const dur = audioEl.duration;
+  if (!Number.isFinite(dur) || dur <= 0) return;
+  const cur = Math.max(0, Math.min(audioEl.currentTime || 0, dur));
+  try {
+    navigator.mediaSession.setPositionState({
+      duration: dur,
+      playbackRate: audioEl.playbackRate || 1,
+      position: cur
+    });
+    lastPosSyncAt = Date.now();
+  } catch (_) {}
+}
+
+function attemptPlay(expectedTrackId, attempt = 0) {
+  if (currentTrackId !== expectedTrackId || userPaused) return;
+  setAudioSessionPlayback();
+  const p = audioEl.play();
+  if (p && typeof p.then === "function") {
+    p.then(() => {
+      if (currentTrackId !== expectedTrackId) return;
+      isTransitioning = false;
+      clearTimeout(transitionTimer);
+      if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+      updateMediaSessionPosition();
+    }).catch((err) => {
+      if (currentTrackId !== expectedTrackId || userPaused) return;
+      console.warn(`Play attempt ${attempt + 1} failed:`, err);
+      if (attempt < 3) {
+        let retried = false;
+        const doRetry = () => {
+          if (retried || currentTrackId !== expectedTrackId || userPaused) return;
+          retried = true;
+          attemptPlay(expectedTrackId, attempt + 1);
+        };
+        if (audioEl.readyState < 2) {
+          audioEl.addEventListener("canplay", doRetry, { once: true });
+        }
+        setTimeout(doRetry, (attempt + 1) * 350);
+      } else {
+        isTransitioning = false;
+        clearTimeout(transitionTimer);
+      }
+    });
+  } else {
+    isTransitioning = false;
+    clearTimeout(transitionTimer);
+  }
+}
+
 function playTrackById(id) {
   const track = tracks.find((t) => t.id === id);
   if (!track || !track.blob) return;
 
-  if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
-  currentObjectUrl = URL.createObjectURL(track.blob);
+  setAudioSessionPlayback();
+  isTransitioning = true;
+  userPaused = false;
+  lastObservedTime = 0;
+  lastAdvanceAt = Date.now();
+  errorRecoveredTrackId = null;
+
+  clearTimeout(transitionTimer);
+  transitionTimer = setTimeout(() => {
+    isTransitioning = false;
+  }, 5000);
+
+  const prevUrl = currentObjectUrl;
+  currentObjectUrl = URL.createObjectURL(ensureTypedAudioBlob(track.blob, track.title));
   currentTrackId = track.id;
   inspectedTrackId = track.id;
 
+  audioEl.loop = true;
   audioEl.src = currentObjectUrl;
-  audioEl.play().catch((e) => console.warn("Play error:", e));
+  attemptPlay(track.id, 0);
 
-  updateMiniPlayer(track);
-  populateSheet(track);
-  renderTrackList();
+  if (prevUrl) {
+    setTimeout(() => {
+      try { URL.revokeObjectURL(prevUrl); } catch (_) {}
+    }, 3000);
+  }
+
   setupMediaSession(track);
+  updateMiniPlayer(track);
+  updateActiveTrackRowHighlight();
+  if (!document.hidden) {
+    populateSheet(track);
+  }
+}
+
+function advanceToNextTrack(reason) {
+  if (isTransitioning || userPaused) return;
+  const now = Date.now();
+  if (now - lastAdvanceAt < 1200) return;
+
+  const nextTrack = getNextTrackInPool(1);
+  if (!nextTrack) return;
+
+  if (nextTrack.id === currentTrackId) {
+    // Only 1 track in pool: let native loop repeat seamlessly without clipping or reloading
+    if (reason === "ended") {
+      lastManualSeekAt = now;
+      lastObservedTime = 0;
+      audioEl.currentTime = 0;
+      attemptPlay(currentTrackId, 0);
+    } else {
+      lastAdvanceAt = now;
+      lastObservedTime = 0;
+      updateMediaSessionPosition();
+    }
+    return;
+  }
+
+  playTrackById(nextTrack.id);
 }
 
 function updateMiniPlayer(track) {
@@ -680,32 +835,60 @@ function updateMiniPlayer(track) {
 
 function setupMediaSession(track) {
   if (!("mediaSession" in navigator)) return;
+  const art180 = new URL("./apple-touch-icon.png", window.location.href).href;
+  const art512 = new URL("./icon-512.png", window.location.href).href;
+
   navigator.mediaSession.metadata = new MediaMetadata({
     title: track.title,
     artist: `${track.artist} · ${track.vibeShort || ""}`,
     album: `SoundPulse AI (${track.genreDisplay || "Музыка"})`,
     artwork: [
-      { src: "./apple-touch-icon.png", sizes: "180x180", type: "image/png" },
-      { src: "./icon-512.png", sizes: "512x512", type: "image/png" }
+      { src: art180, sizes: "180x180", type: "image/png" },
+      { src: art512, sizes: "512x512", type: "image/png" }
     ]
   });
   navigator.mediaSession.playbackState = "playing";
-  navigator.mediaSession.setActionHandler("play", () => audioEl.play());
-  navigator.mediaSession.setActionHandler("pause", () => audioEl.pause());
-  navigator.mediaSession.setActionHandler("previoustrack", () => playAdjacent(-1));
-  navigator.mediaSession.setActionHandler("nexttrack", () => playAdjacent(1));
-  navigator.mediaSession.setActionHandler("seekto", (details) => {
-    if (details.seekTime != null) audioEl.currentTime = details.seekTime;
+
+  const safeHandler = (action, fn) => {
+    try {
+      navigator.mediaSession.setActionHandler(action, fn);
+    } catch (_) {}
+  };
+
+  safeHandler("play", () => {
+    userPaused = false;
+    setAudioSessionPlayback();
+    audioEl.play().catch(() => {});
+  });
+  safeHandler("pause", () => {
+    userPaused = true;
+    audioEl.pause();
+  });
+  safeHandler("previoustrack", () => {
+    if (audioEl.currentTime > 3) {
+      lastManualSeekAt = Date.now();
+      lastObservedTime = 0;
+      audioEl.currentTime = 0;
+      updateMediaSessionPosition();
+    } else {
+      playAdjacent(-1);
+    }
+  });
+  safeHandler("nexttrack", () => playAdjacent(1));
+  safeHandler("seekto", (details) => {
+    if (details.seekTime != null && Number.isFinite(details.seekTime)) {
+      lastManualSeekAt = Date.now();
+      lastObservedTime = details.seekTime;
+      audioEl.currentTime = details.seekTime;
+      updateMediaSessionPosition();
+    }
   });
 }
 
 function playAdjacent(dir) {
-  const list = getFilteredTracks();
-  const pool = list.length ? list : tracks;
-  if (!pool.length) return;
-  const idx = pool.findIndex((t) => t.id === currentTrackId);
-  const nextIdx = (idx + dir + pool.length) % pool.length;
-  playTrackById(pool[nextIdx].id);
+  const nextTrack = getNextTrackInPool(dir);
+  if (!nextTrack) return;
+  playTrackById(nextTrack.id);
 }
 
 function openInspectorSheet(id) {
@@ -774,41 +957,41 @@ function initVizBars() {
 }
 
 function startVisualizerLoop() {
-  if (vizRafId) cancelAnimationFrame(vizRafId);
+  if (vizRafId) {
+    cancelAnimationFrame(vizRafId);
+    vizRafId = null;
+  }
   const bars = document.querySelectorAll("#sheetVizBars .viz-bar");
 
   function tick() {
     const sheetOpen = document.getElementById("playerSheet").classList.contains("open");
-    if (!sheetOpen) {
-      vizRafId = requestAnimationFrame(tick);
-      return;
-    }
-
     const track = tracks.find((t) => t.id === currentTrackId);
     const color = track?.vibeColor || "#10b981";
 
-    if (!audioEl.paused) {
-      const time = audioEl.currentTime || 0;
-      const bpm = track?.bpm || 110;
-      const energy = track?.energy || 0.75;
-      const beatSec = 60 / Math.max(40, bpm);
-      const phase = (time % beatSec) / beatSec;
-      const beatPulse = Math.sin(phase * Math.PI); // Pulse with the track's real beat
-
-      bars.forEach((bar, i) => {
-        const harmonic = Math.sin(time * 5.2 + i * 0.9) * 0.5 + 0.5;
-        const sub = Math.cos(time * 3.1 + i * 1.3) * 0.3 + 0.3;
-        const weight = (beatPulse * 0.55 + harmonic * 0.30 + sub * 0.15) * energy;
-        const h = Math.max(5, Math.min(42, Math.round(weight * 44)));
-        bar.style.height = `${h}px`;
-        bar.style.background = color;
-      });
-    } else {
+    if (!sheetOpen || document.hidden || audioEl.paused) {
       bars.forEach((bar) => {
         bar.style.height = "5px";
         bar.style.background = color;
       });
+      vizRafId = null;
+      return;
     }
+
+    const time = audioEl.currentTime || 0;
+    const bpm = track?.bpm || 110;
+    const energy = track?.energy || 0.75;
+    const beatSec = 60 / Math.max(40, bpm);
+    const phase = (time % beatSec) / beatSec;
+    const beatPulse = Math.sin(phase * Math.PI); // Pulse with the track's real beat
+
+    bars.forEach((bar, i) => {
+      const harmonic = Math.sin(time * 5.2 + i * 0.9) * 0.5 + 0.5;
+      const sub = Math.cos(time * 3.1 + i * 1.3) * 0.3 + 0.3;
+      const weight = (beatPulse * 0.55 + harmonic * 0.30 + sub * 0.15) * energy;
+      const h = Math.max(5, Math.min(42, Math.round(weight * 44)));
+      bar.style.height = `${h}px`;
+      bar.style.background = color;
+    });
 
     vizRafId = requestAnimationFrame(tick);
   }
@@ -858,7 +1041,10 @@ function initSeekEvents() {
       if (target >= audioEl.duration - 0.35) {
         playAdjacent(1);
       } else {
+        lastManualSeekAt = Date.now();
+        lastObservedTime = target;
         audioEl.currentTime = target;
+        updateMediaSessionPosition();
       }
     }
   }
@@ -1045,6 +1231,8 @@ async function initApp() {
   initDspTables();
   initVizBars();
   initSeekEvents();
+  setAudioSessionPlayback();
+  audioEl.loop = true;
 
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./sw.js").then((reg) => {
@@ -1167,8 +1355,15 @@ async function initApp() {
       playTrackById(tracks[0].id);
       return;
     }
-    if (audioEl.paused) audioEl.play();
-    else audioEl.pause();
+    if (!currentTrackId) return;
+    if (audioEl.paused) {
+      userPaused = false;
+      setAudioSessionPlayback();
+      attemptPlay(currentTrackId, 0);
+    } else {
+      userPaused = true;
+      audioEl.pause();
+    }
   };
 
   document.getElementById("btnMiniPlay").addEventListener("click", togglePlay);
@@ -1176,8 +1371,14 @@ async function initApp() {
   document.getElementById("btnMiniNext").addEventListener("click", () => playAdjacent(1));
   document.getElementById("btnSheetNext").addEventListener("click", () => playAdjacent(1));
   document.getElementById("btnSheetPrev").addEventListener("click", () => {
-    if (audioEl.currentTime > 3) audioEl.currentTime = 0;
-    else playAdjacent(-1);
+    if (audioEl.currentTime > 3) {
+      lastManualSeekAt = Date.now();
+      lastObservedTime = 0;
+      audioEl.currentTime = 0;
+      updateMediaSessionPosition();
+    } else {
+      playAdjacent(-1);
+    }
   });
 
   document.getElementById("miniOpenSheet").addEventListener("click", () => openInspectorSheet(currentTrackId));
@@ -1191,6 +1392,9 @@ async function initApp() {
     await dbDeleteTrack(id);
     tracks = tracks.filter((t) => t.id !== id);
     if (currentTrackId === id) {
+      userPaused = true;
+      isTransitioning = false;
+      clearTimeout(transitionTimer);
       audioEl.pause();
       audioEl.removeAttribute("src");
       currentTrackId = null;
@@ -1207,6 +1411,9 @@ async function initApp() {
     if (!confirm("Очистить все сохранённые треки из памяти устройства?")) return;
     await dbClearAll();
     tracks = [];
+    userPaused = true;
+    isTransitioning = false;
+    clearTimeout(transitionTimer);
     audioEl.pause();
     currentTrackId = null;
     updateMiniPlayer(null);
@@ -1215,16 +1422,140 @@ async function initApp() {
     updateStatsView();
   });
 
+  audioEl.addEventListener("playing", () => {
+    isTransitioning = false;
+    clearTimeout(transitionTimer);
+    errorRecoveredTrackId = null;
+    syncPlayButtons();
+    if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+    updateMediaSessionPosition();
+    if (!document.hidden && document.getElementById("playerSheet").classList.contains("open")) {
+      startVisualizerLoop();
+    }
+  });
+
   audioEl.addEventListener("play", () => {
     syncPlayButtons();
     if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
   });
+
   audioEl.addEventListener("pause", () => {
+    const dur = audioEl.duration;
+    const cur = audioEl.currentTime || 0;
+    const nearEnd = Number.isFinite(dur) && dur > 1.5 && (audioEl.ended || (dur - cur) <= 0.7);
+    if (isTransitioning || (!userPaused && nearEnd)) {
+      if (!isTransitioning && nearEnd) advanceToNextTrack("pause-near-end");
+      return;
+    }
     syncPlayButtons();
     if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
   });
-  audioEl.addEventListener("ended", () => playAdjacent(1));
+
+  audioEl.addEventListener("loadedmetadata", () => {
+    if (!document.hidden && Number.isFinite(audioEl.duration) && audioEl.duration > 0) {
+      document.getElementById("seekDurText").textContent = formatTime(audioEl.duration);
+    }
+    updateMediaSessionPosition();
+  });
+
+  audioEl.addEventListener("ended", () => {
+    advanceToNextTrack("ended");
+  });
+
+  audioEl.addEventListener("seeked", () => {
+    const dur = audioEl.duration;
+    const cur = audioEl.currentTime || 0;
+    if (
+      !isTransitioning &&
+      !isUserSeeking &&
+      !audioEl.paused &&
+      !userPaused &&
+      (Date.now() - lastManualSeekAt) >= 1500 &&
+      Number.isFinite(dur) &&
+      dur > 3.0 &&
+      lastObservedTime > (dur - 6.0) &&
+      cur < 1.5
+    ) {
+      advanceToNextTrack("seeked-loop-wrap");
+      return;
+    }
+    lastObservedTime = cur;
+    updateMediaSessionPosition();
+  });
+
   audioEl.addEventListener("timeupdate", () => {
+    const dur = audioEl.duration || 0;
+    const cur = audioEl.currentTime || 0;
+
+    if (!document.hidden && dur > 0) {
+      const pct = `${Math.min(100, (cur / dur) * 100).toFixed(2)}%`;
+      document.getElementById("miniProgressFill").style.width = pct;
+      if (!isUserSeeking) {
+        document.getElementById("seekFill").style.width = pct;
+        document.getElementById("seekKnob").style.left = pct;
+        document.getElementById("seekCurText").textContent = formatTime(cur);
+      }
+      document.getElementById("seekDurText").textContent = formatTime(dur);
+    }
+
+    if (Number.isFinite(dur) && dur > 0 && !isTransitioning && !isUserSeeking && !audioEl.paused && !userPaused) {
+      // Layer 1: proactive handoff right before EOF while iOS audio session is still active
+      if (dur > 1.5 && (dur - cur) <= 0.45) {
+        const next = getNextTrackInPool(1);
+        if (next && next.id !== currentTrackId) {
+          advanceToNextTrack("timeupdate-near-end");
+          return;
+        }
+      }
+
+      // Layer 2: loop-wrap rescue if iOS throttled timeupdate past EOF and native loop wrapped to 0
+      if ((Date.now() - lastManualSeekAt) >= 1500 && dur > 3.0 && lastObservedTime > (dur - 6.0) && cur < 2.5) {
+        advanceToNextTrack("timeupdate-loop-wrap");
+        return;
+      }
+
+      lastObservedTime = cur;
+      const now = Date.now();
+      if (now - lastPosSyncAt >= 2000) {
+        updateMediaSessionPosition();
+      }
+    }
+  });
+
+  audioEl.addEventListener("error", async () => {
+    if (!currentTrackId || userPaused || errorRecoveredTrackId === currentTrackId) return;
+    errorRecoveredTrackId = currentTrackId;
+    const failedTrackId = currentTrackId;
+    try {
+      const fresh = await dbGetTrack(failedTrackId);
+      if (!fresh || !fresh.blob || currentTrackId !== failedTrackId || userPaused) return;
+      const idx = tracks.findIndex((t) => t.id === failedTrackId);
+      if (idx >= 0) tracks[idx].blob = fresh.blob;
+      const prevUrl = currentObjectUrl;
+      currentObjectUrl = URL.createObjectURL(ensureTypedAudioBlob(fresh.blob, fresh.title));
+      audioEl.loop = true;
+      audioEl.src = currentObjectUrl;
+      attemptPlay(failedTrackId, 0);
+      if (prevUrl) {
+        setTimeout(() => {
+          try { URL.revokeObjectURL(prevUrl); } catch (_) {}
+        }, 3000);
+      }
+    } catch (recoverErr) {
+      console.warn("Audio error recovery failed:", recoverErr);
+    }
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    const track = tracks.find((t) => t.id === currentTrackId);
+    if (track) {
+      updateMiniPlayer(track);
+      populateSheet(track);
+    }
+    updateActiveTrackRowHighlight();
+    syncPlayButtons();
+
     const dur = audioEl.duration || 0;
     const cur = audioEl.currentTime || 0;
     if (dur > 0) {
@@ -1237,6 +1568,10 @@ async function initApp() {
       }
       document.getElementById("seekDurText").textContent = formatTime(dur);
     }
+
+    if (document.getElementById("playerSheet").classList.contains("open") && !audioEl.paused) {
+      startVisualizerLoop();
+    }
   });
 }
 
@@ -1246,7 +1581,7 @@ function syncPlayButtons() {
   document.getElementById("miniPauseSvg").style.display = playing ? "block" : "none";
   document.getElementById("sheetPlaySvg").style.display = playing ? "none" : "block";
   document.getElementById("sheetPauseSvg").style.display = playing ? "block" : "none";
-  renderTrackList();
+  updateActiveTrackRowHighlight();
 }
 
 document.addEventListener("DOMContentLoaded", initApp);
