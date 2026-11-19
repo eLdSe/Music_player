@@ -450,6 +450,21 @@ let lastManualSeekAt = 0;
 let lastAdvanceAt = 0;
 let lastPosSyncAt = 0;
 let errorRecoveredTrackId = null;
+let playGeneration = 0;
+let playbackStartedWallMs = 0;
+let playbackStartAudioPos = 0;
+
+function isLoopWrapDetected(cur, dur) {
+  if (!Number.isFinite(dur) || dur <= 2.0) return false;
+  if ((Date.now() - lastManualSeekAt) < 1500) return false;
+  if (cur >= Math.min(5.0, dur * 0.4)) return false;
+  const observedPassedHalf = lastObservedTime > Math.min(dur * 0.5, dur - 1.5) && (lastObservedTime - cur) > 1.5;
+  const elapsedSec = playbackStartedWallMs > 0
+    ? ((Date.now() - playbackStartedWallMs) / 1000) * (audioEl.playbackRate || 1)
+    : 0;
+  const wallClockPassedEof = (playbackStartAudioPos + elapsedSec) >= (dur - 1.5);
+  return observedPassedHalf || wallClockPassedEof;
+}
 
 function setAudioSessionPlayback() {
   try {
@@ -720,26 +735,26 @@ function updateMediaSessionPosition() {
   } catch (_) {}
 }
 
-function attemptPlay(expectedTrackId, attempt = 0) {
-  if (currentTrackId !== expectedTrackId || userPaused) return;
+function attemptPlay(expectedTrackId, expectedGen, attempt = 0) {
+  if (expectedGen !== playGeneration || currentTrackId !== expectedTrackId || userPaused) return;
   setAudioSessionPlayback();
   const p = audioEl.play();
   if (p && typeof p.then === "function") {
     p.then(() => {
-      if (currentTrackId !== expectedTrackId) return;
+      if (expectedGen !== playGeneration || currentTrackId !== expectedTrackId || userPaused) return;
       isTransitioning = false;
       clearTimeout(transitionTimer);
       if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
       updateMediaSessionPosition();
     }).catch((err) => {
-      if (currentTrackId !== expectedTrackId || userPaused) return;
+      if (expectedGen !== playGeneration || currentTrackId !== expectedTrackId || userPaused) return;
       console.warn(`Play attempt ${attempt + 1} failed:`, err);
       if (attempt < 3) {
         let retried = false;
         const doRetry = () => {
-          if (retried || currentTrackId !== expectedTrackId || userPaused) return;
+          if (retried || expectedGen !== playGeneration || currentTrackId !== expectedTrackId || userPaused) return;
           retried = true;
-          attemptPlay(expectedTrackId, attempt + 1);
+          attemptPlay(expectedTrackId, expectedGen, attempt + 1);
         };
         if (audioEl.readyState < 2) {
           audioEl.addEventListener("canplay", doRetry, { once: true });
@@ -761,10 +776,13 @@ function playTrackById(id) {
   if (!track || !track.blob) return;
 
   setAudioSessionPlayback();
+  const gen = ++playGeneration;
   isTransitioning = true;
   userPaused = false;
   lastObservedTime = 0;
   lastAdvanceAt = Date.now();
+  playbackStartedWallMs = lastAdvanceAt;
+  playbackStartAudioPos = 0;
   errorRecoveredTrackId = null;
 
   clearTimeout(transitionTimer);
@@ -779,7 +797,7 @@ function playTrackById(id) {
 
   audioEl.loop = true;
   audioEl.src = currentObjectUrl;
-  attemptPlay(track.id, 0);
+  attemptPlay(track.id, gen, 0);
 
   if (prevUrl) {
     setTimeout(() => {
@@ -805,11 +823,13 @@ function advanceToNextTrack(reason) {
 
   if (nextTrack.id === currentTrackId) {
     // Only 1 track in pool: let native loop repeat seamlessly without clipping or reloading
+    playbackStartedWallMs = now;
+    playbackStartAudioPos = 0;
     if (reason === "ended") {
       lastManualSeekAt = now;
       lastObservedTime = 0;
       audioEl.currentTime = 0;
-      attemptPlay(currentTrackId, 0);
+      attemptPlay(currentTrackId, ++playGeneration, 0);
     } else {
       lastAdvanceAt = now;
       lastObservedTime = 0;
@@ -858,16 +878,21 @@ function setupMediaSession(track) {
   safeHandler("play", () => {
     userPaused = false;
     setAudioSessionPlayback();
-    audioEl.play().catch(() => {});
+    if (currentTrackId) attemptPlay(currentTrackId, ++playGeneration, 0);
+    else audioEl.play().catch(() => {});
   });
   safeHandler("pause", () => {
+    playGeneration++;
     userPaused = true;
     audioEl.pause();
   });
   safeHandler("previoustrack", () => {
     if (audioEl.currentTime > 3) {
-      lastManualSeekAt = Date.now();
+      const now = Date.now();
+      lastManualSeekAt = now;
       lastObservedTime = 0;
+      playbackStartedWallMs = now;
+      playbackStartAudioPos = 0;
       audioEl.currentTime = 0;
       updateMediaSessionPosition();
     } else {
@@ -877,8 +902,11 @@ function setupMediaSession(track) {
   safeHandler("nexttrack", () => playAdjacent(1));
   safeHandler("seekto", (details) => {
     if (details.seekTime != null && Number.isFinite(details.seekTime)) {
-      lastManualSeekAt = Date.now();
+      const now = Date.now();
+      lastManualSeekAt = now;
       lastObservedTime = details.seekTime;
+      playbackStartedWallMs = now;
+      playbackStartAudioPos = details.seekTime;
       audioEl.currentTime = details.seekTime;
       updateMediaSessionPosition();
     }
@@ -1043,6 +1071,8 @@ function initSeekEvents() {
       } else {
         lastManualSeekAt = Date.now();
         lastObservedTime = target;
+        playbackStartedWallMs = lastManualSeekAt;
+        playbackStartAudioPos = target;
         audioEl.currentTime = target;
         updateMediaSessionPosition();
       }
@@ -1359,8 +1389,9 @@ async function initApp() {
     if (audioEl.paused) {
       userPaused = false;
       setAudioSessionPlayback();
-      attemptPlay(currentTrackId, 0);
+      attemptPlay(currentTrackId, ++playGeneration, 0);
     } else {
+      playGeneration++;
       userPaused = true;
       audioEl.pause();
     }
@@ -1372,8 +1403,11 @@ async function initApp() {
   document.getElementById("btnSheetNext").addEventListener("click", () => playAdjacent(1));
   document.getElementById("btnSheetPrev").addEventListener("click", () => {
     if (audioEl.currentTime > 3) {
-      lastManualSeekAt = Date.now();
+      const now = Date.now();
+      lastManualSeekAt = now;
       lastObservedTime = 0;
+      playbackStartedWallMs = now;
+      playbackStartAudioPos = 0;
       audioEl.currentTime = 0;
       updateMediaSessionPosition();
     } else {
@@ -1392,6 +1426,7 @@ async function initApp() {
     await dbDeleteTrack(id);
     tracks = tracks.filter((t) => t.id !== id);
     if (currentTrackId === id) {
+      playGeneration++;
       userPaused = true;
       isTransitioning = false;
       clearTimeout(transitionTimer);
@@ -1411,6 +1446,7 @@ async function initApp() {
     if (!confirm("Очистить все сохранённые треки из памяти устройства?")) return;
     await dbClearAll();
     tracks = [];
+    playGeneration++;
     userPaused = true;
     isTransitioning = false;
     clearTimeout(transitionTimer);
@@ -1426,6 +1462,8 @@ async function initApp() {
     isTransitioning = false;
     clearTimeout(transitionTimer);
     errorRecoveredTrackId = null;
+    playbackStartedWallMs = Date.now();
+    playbackStartAudioPos = audioEl.currentTime || 0;
     syncPlayButtons();
     if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
     updateMediaSessionPosition();
@@ -1435,6 +1473,8 @@ async function initApp() {
   });
 
   audioEl.addEventListener("play", () => {
+    userPaused = false;
+    setAudioSessionPlayback();
     syncPlayButtons();
     if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
   });
@@ -1465,17 +1505,7 @@ async function initApp() {
   audioEl.addEventListener("seeked", () => {
     const dur = audioEl.duration;
     const cur = audioEl.currentTime || 0;
-    if (
-      !isTransitioning &&
-      !isUserSeeking &&
-      !audioEl.paused &&
-      !userPaused &&
-      (Date.now() - lastManualSeekAt) >= 1500 &&
-      Number.isFinite(dur) &&
-      dur > 3.0 &&
-      lastObservedTime > (dur - 6.0) &&
-      cur < 1.5
-    ) {
+    if (!isTransitioning && !isUserSeeking && !audioEl.paused && !userPaused && isLoopWrapDetected(cur, dur)) {
       advanceToNextTrack("seeked-loop-wrap");
       return;
     }
@@ -1509,7 +1539,7 @@ async function initApp() {
       }
 
       // Layer 2: loop-wrap rescue if iOS throttled timeupdate past EOF and native loop wrapped to 0
-      if ((Date.now() - lastManualSeekAt) >= 1500 && dur > 3.0 && lastObservedTime > (dur - 6.0) && cur < 2.5) {
+      if (isLoopWrapDetected(cur, dur)) {
         advanceToNextTrack("timeupdate-loop-wrap");
         return;
       }
@@ -1526,16 +1556,17 @@ async function initApp() {
     if (!currentTrackId || userPaused || errorRecoveredTrackId === currentTrackId) return;
     errorRecoveredTrackId = currentTrackId;
     const failedTrackId = currentTrackId;
+    const gen = ++playGeneration;
     try {
       const fresh = await dbGetTrack(failedTrackId);
-      if (!fresh || !fresh.blob || currentTrackId !== failedTrackId || userPaused) return;
+      if (!fresh || !fresh.blob || currentTrackId !== failedTrackId || userPaused || gen !== playGeneration) return;
       const idx = tracks.findIndex((t) => t.id === failedTrackId);
       if (idx >= 0) tracks[idx].blob = fresh.blob;
       const prevUrl = currentObjectUrl;
       currentObjectUrl = URL.createObjectURL(ensureTypedAudioBlob(fresh.blob, fresh.title));
       audioEl.loop = true;
       audioEl.src = currentObjectUrl;
-      attemptPlay(failedTrackId, 0);
+      attemptPlay(failedTrackId, gen, 0);
       if (prevUrl) {
         setTimeout(() => {
           try { URL.revokeObjectURL(prevUrl); } catch (_) {}

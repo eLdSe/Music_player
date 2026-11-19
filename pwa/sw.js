@@ -1,10 +1,10 @@
-const CACHE_NAME = "soundpulse-pwa-v9";
+const CACHE_NAME = "soundpulse-pwa-v10";
 const CORE_ASSETS = [
   "./",
   "./index.html",
-  "./index.html?v=9",
-  "./styles.css?v=9",
-  "./app.js?v=9",
+  "./index.html?v=10",
+  "./styles.css?v=10",
+  "./app.js?v=10",
   "./manifest.json",
   "./apple-touch-icon.png",
   "./icon-512.png",
@@ -37,6 +37,11 @@ self.addEventListener("fetch", (event) => {
   try {
     url = new URL(req.url);
   } catch {
+    return;
+  }
+
+  // Never intercept blob:, data:, chrome-extension:, or non-HTTP(S) URLs
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
     return;
   }
 
